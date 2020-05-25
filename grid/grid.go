@@ -45,6 +45,7 @@ type Manager struct {
 	minAmount       decimal.Decimal
 	minTotal        decimal.Decimal
 
+	scale        decimal.Decimal
 	grids        []Grid
 	base         int
 	averagePrice decimal.Decimal
@@ -68,6 +69,7 @@ func (m *Manager) Init(ctx context.Context) {
 }
 
 func (m *Manager) Trade(ctx context.Context) error {
+	_ = m.Print(ctx)
 	clientId := fmt.Sprintf("%d", time.Now().Unix())
 	// subscribe all event
 	go m.ex.SubscribeOrder(ctx, m.symbol, clientId, m.OrderUpdateHandler)
@@ -86,6 +88,19 @@ func (m *Manager) Trade(ctx context.Context) error {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Info("Trade is now stopping...")
+
+	return nil
+}
+
+// print grid to stdout
+func (m *Manager) Print(ctx context.Context) error {
+	delta, _ := m.scale.Float64()
+	delta = 1 - delta
+	log.Infof("Scale is %s (%1.2f%%)", m.scale.String(), 100*delta)
+	log.Infof("Id\tTotal\tPrice\tAmountBuy\tAmountSell")
+	for _, g := range m.grids {
+		log.Infof("%2d\t%s\t%s\t%s\t%s", g.Id, g.TotalBuy, g.Price, g.AmountBuy, g.AmountSell)
+	}
 
 	return nil
 }
@@ -123,8 +138,8 @@ func (m *Manager) initEx(ctx context.Context) {
 	m.amountPrecision = int32(huobi.AmountPrecision[m.symbol])
 	m.minAmount = decimal.NewFromFloat(huobi.MinAmount[m.symbol])
 	m.minTotal = decimal.NewFromInt(huobi.MinTotal[m.symbol])
-	log.Debugf("init ex, pricePrecision = %d, amountPrecision = %d, minAmount = %s, minTotal = %s",
-		m.pricePrecision, m.amountPrecision, m.minAmount.String(), m.minTotal.String())
+	//log.Debugf("init ex, pricePrecision = %d, amountPrecision = %d, minAmount = %s, minTotal = %s",
+	//	m.pricePrecision, m.amountPrecision, m.minAmount.String(), m.minTotal.String())
 }
 
 func (m *Manager) initGrids(ctx context.Context) {
@@ -132,10 +147,9 @@ func (m *Manager) initGrids(ctx context.Context) {
 	minPrice := m.config.Strategy.MinPrice
 	number := m.config.Strategy.Number
 	total := m.config.Strategy.Total
-	log.Debugf("init grids, MaxPrice: %f, MinPrice: %f, Grid Number: %d, total: %f",
-		maxPrice, minPrice, number, total)
-	scale := decimal.NewFromFloat(math.Pow(minPrice/maxPrice, 1.0/float64(number)))
-	log.Debugf("scale is %s", scale.String())
+	//log.Debugf("init grids, MaxPrice: %f, MinPrice: %f, Grid Number: %d, total: %f",
+	//	maxPrice, minPrice, number, total)
+	m.scale = decimal.NewFromFloat(math.Pow(minPrice/maxPrice, 1.0/float64(number)))
 	preTotal := decimal.NewFromFloat(total / float64(number))
 	currentPrice := decimal.NewFromFloat(maxPrice)
 	currentGrid := Grid{
@@ -144,7 +158,7 @@ func (m *Manager) initGrids(ctx context.Context) {
 	}
 	m.grids = append(m.grids, currentGrid)
 	for i := 1; i <= number; i++ {
-		currentPrice = currentPrice.Mul(scale).Round(m.pricePrecision)
+		currentPrice = currentPrice.Mul(m.scale).Round(m.pricePrecision)
 		amountBuy := preTotal.Div(currentPrice).Round(m.amountPrecision)
 		if amountBuy.Cmp(m.minAmount) == -1 {
 			log.Fatalf("amount %s less than minAmount(%s)", amountBuy, m.minAmount)
@@ -162,11 +176,6 @@ func (m *Manager) initGrids(ctx context.Context) {
 		m.grids = append(m.grids, currentGrid)
 		m.grids[i-1].AmountSell = amountBuy
 	}
-	log.Infof("Id\tTotal\tPrice\tAmountBuy\tAmountSell")
-	for _, g := range m.grids {
-		log.Infof("%2d\t%s\t%s\t%s\t%s", g.Id, g.TotalBuy, g.Price, g.AmountBuy, g.AmountSell)
-	}
-	log.Info("finish init grid parameters")
 }
 
 func (m *Manager) ReBalance(ctx context.Context) error {
