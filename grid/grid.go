@@ -7,9 +7,9 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/xyths/hs"
 	"github.com/xyths/hs/exchange/huobi"
+	"github.com/xyths/hs/log"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"log"
 	"math"
 	"os"
 	"os/signal"
@@ -85,7 +85,7 @@ func (m *Manager) Trade(ctx context.Context) error {
 	// kill -9 is syscall.SIGKILL but can't be catch, so don't need add it
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("Trade is now stopping...")
+	log.Info("Trade is now stopping...")
 
 	return nil
 }
@@ -123,7 +123,7 @@ func (m *Manager) initEx(ctx context.Context) {
 	m.amountPrecision = int32(huobi.AmountPrecision[m.symbol])
 	m.minAmount = decimal.NewFromFloat(huobi.MinAmount[m.symbol])
 	m.minTotal = decimal.NewFromInt(huobi.MinTotal[m.symbol])
-	log.Printf("init ex, pricePrecision = %d, amountPrecision = %d, minAmount = %s, minTotal = %s",
+	log.Debugf("init ex, pricePrecision = %d, amountPrecision = %d, minAmount = %s, minTotal = %s",
 		m.pricePrecision, m.amountPrecision, m.minAmount.String(), m.minTotal.String())
 }
 
@@ -132,10 +132,10 @@ func (m *Manager) initGrids(ctx context.Context) {
 	minPrice := m.config.Strategy.MinPrice
 	number := m.config.Strategy.Number
 	total := m.config.Strategy.Total
-	log.Printf("init grids, MaxPrice: %f, MinPrice: %f, Grid Number: %d, total: %f",
+	log.Debugf("init grids, MaxPrice: %f, MinPrice: %f, Grid Number: %d, total: %f",
 		maxPrice, minPrice, number, total)
 	scale := decimal.NewFromFloat(math.Pow(minPrice/maxPrice, 1.0/float64(number)))
-	log.Printf("scale is %s", scale.String())
+	log.Debugf("scale is %s", scale.String())
 	preTotal := decimal.NewFromFloat(total / float64(number))
 	currentPrice := decimal.NewFromFloat(maxPrice)
 	currentGrid := Grid{
@@ -162,11 +162,11 @@ func (m *Manager) initGrids(ctx context.Context) {
 		m.grids = append(m.grids, currentGrid)
 		m.grids[i-1].AmountSell = amountBuy
 	}
-	log.Println("Id\tTotal\tPrice\tAmountBuy\tAmountSell")
+	log.Infof("Id\tTotal\tPrice\tAmountBuy\tAmountSell")
 	for _, g := range m.grids {
-		log.Printf("%2d\t%s\t%s\t%s\t%s", g.Id, g.TotalBuy, g.Price, g.AmountBuy, g.AmountSell)
+		log.Infof("%2d\t%s\t%s\t%s\t%s", g.Id, g.TotalBuy, g.Price, g.AmountBuy, g.AmountSell)
 	}
-	log.Println("finish init grid parameters")
+	log.Info("finish init grid parameters")
 }
 
 func (m *Manager) ReBalance(ctx context.Context) error {
@@ -185,21 +185,21 @@ func (m *Manager) ReBalance(ctx context.Context) error {
 			moneyNeed = moneyNeed.Add(g.TotalBuy)
 		}
 	}
-	log.Printf("now base = %d, moneyNeed = %s, coinNeed = %s", m.base, moneyNeed, coinNeed)
+	log.Infof("now base = %d, moneyNeed = %s, coinNeed = %s", m.base, moneyNeed, coinNeed)
 	balance, err := m.ex.GetSpotBalance()
 	if err != nil {
 		log.Fatalf("error when get balance in rebalance: %s", err)
 	}
 	moneyHeld := balance[m.quoteCurrency]
 	coinHeld := balance[m.baseCurrency]
-	log.Printf("account has money %s, coin %s", moneyHeld, coinHeld)
+	log.Infof("account has money %s, coin %s", moneyHeld, coinHeld)
 	m.averagePrice = price
 	m.amountHeld = coinNeed
 	direct, amount := m.assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, price)
 	if direct == -2 || direct == 2 {
 		log.Fatalf("no enough money for rebalance, direct: %d", direct)
 	} else if direct == 0 {
-		log.Printf("no need to rebalance")
+		log.Info("no need to rebalance")
 	} else if direct == -1 {
 		// place sell order
 		m.base++
@@ -208,7 +208,7 @@ func (m *Manager) ReBalance(ctx context.Context) error {
 		if err != nil {
 			log.Fatalf("error when rebalance: %s", err)
 		}
-		log.Printf("rebalance: sell %s coin at price %s, orderId is %d, clientOrderId is %s",
+		log.Debugf("rebalance: sell %s coin at price %s, orderId is %d, clientOrderId is %s",
 			amount, price, orderId, clientOrderId)
 	} else if direct == 1 {
 		// place buy order
@@ -217,7 +217,7 @@ func (m *Manager) ReBalance(ctx context.Context) error {
 		if err != nil {
 			log.Fatalf("error when rebalance: %s", err)
 		}
-		log.Printf("rebalance: buy %s coin at price %s, orderId is %d, clientOrderId is %s",
+		log.Debugf("rebalance: buy %s coin at price %s, orderId is %d, clientOrderId is %s",
 			amount, price, orderId, clientOrderId)
 	}
 
@@ -227,19 +227,19 @@ func (m *Manager) ReBalance(ctx context.Context) error {
 func (m *Manager) OrderUpdateHandler(response interface{}) {
 	subOrderResponse, ok := response.(order.SubscribeOrderV2Response)
 	if !ok {
-		log.Printf("Received unknown response: %v", response)
+		log.Warnf("Received unknown response: %v", response)
 	}
 	//log.Printf("subOrderResponse = %#v", subOrderResponse)
 	if subOrderResponse.Action == "sub" {
 		if subOrderResponse.IsSuccess() {
-			log.Printf("Subscription topic %s successfully", subOrderResponse.Ch)
+			log.Infof("Subscription topic %s successfully", subOrderResponse.Ch)
 		} else {
 			log.Fatalf("Subscription topic %s error, code: %d, message: %s",
 				subOrderResponse.Ch, subOrderResponse.Code, subOrderResponse.Message)
 		}
 	} else if subOrderResponse.Action == "push" {
 		if subOrderResponse.Data == nil {
-			log.Printf("SubscribeOrderV2Response has no data: %#v", subOrderResponse)
+			log.Infof("SubscribeOrderV2Response has no data: %#v", subOrderResponse)
 			return
 		}
 		o := subOrderResponse.Data
@@ -247,32 +247,49 @@ func (m *Manager) OrderUpdateHandler(response interface{}) {
 		//	o.EventType, o.Symbol, o.Type, o.OrderId, o.ClientOrderId, o.OrderStatus)
 		switch o.EventType {
 		case "creation":
-			log.Printf("order created, orderId: %d, clientOrderId: %s", o.OrderId, o.ClientOrderId)
+			log.Debugf("order created, orderId: %d, clientOrderId: %s", o.OrderId, o.ClientOrderId)
 		case "cancellation":
-			log.Printf("order cancelled, orderId: %d, clientOrderId: %s", o.OrderId, o.ClientOrderId)
+			log.Debugf("order cancelled, orderId: %d, clientOrderId: %s", o.OrderId, o.ClientOrderId)
 		case "trade":
-			log.Printf("order filled, orderId: %d, clientOrderId: %s, fill type: %s", o.OrderId, o.ClientOrderId, o.OrderStatus)
+			log.Debugf("order filled, orderId: %d, clientOrderId: %s, fill type: %s", o.OrderId, o.ClientOrderId, o.OrderStatus)
 			go m.processOrderTrade(o.TradeId, uint64(o.OrderId), o.ClientOrderId, o.OrderStatus, o.TradePrice, o.TradeVolume, o.RemainAmt)
 		default:
-			log.Printf("unknown eventType, should never happen, orderId: %d, clientOrderId: %s, eventType: %s",
+			log.Warnf("unknown eventType, should never happen, orderId: %d, clientOrderId: %s, eventType: %s",
 				o.OrderId, o.ClientOrderId, o.EventType)
 		}
 	}
 }
 
 func (m *Manager) processOrderTrade(tradeId int64, orderId uint64, clientOrderId, orderStatus, tradePrice, tradeVolume, remainAmount string) {
+	log.Sugar.Debugw("process order trade",
+		"tradeId", tradeId,
+		"orderId", orderId,
+		"clientOrderId", clientOrderId,
+		"orderStatus", orderStatus,
+		"tradePrice", tradePrice,
+		"tradeVolume", tradeVolume,
+		"remainAmount", remainAmount)
 	if strings.HasPrefix(clientOrderId, "p-") {
-		log.Printf("rebalance order filled/partial-filled, tradeId: %d, orderId: %d, clientOrderId: %s", tradeId, orderId, clientOrderId)
+		log.Infof("rebalance order filled/partial-filled, tradeId: %d, orderId: %d, clientOrderId: %s", tradeId, orderId, clientOrderId)
 		return
 	}
 	// update grid
-	if remainAmount != "0" {
+	remain, err := decimal.NewFromString(remainAmount)
+	if err != nil {
+		log.Sugar.Errorw("Error when prase remainAmount",
+			"error", err,
+			"remainAmount", remainAmount)
+	}
+	if !remain.Equal(decimal.NewFromInt(0)) && orderStatus != "filled" {
+		log.Sugar.Infow("not full-filled order",
+			"orderStatus", orderStatus,
+			"remainAmount", remainAmount)
 		return
 	}
 	if strings.HasPrefix(clientOrderId, "b-") {
 		// buy order filled
 		if orderId != m.grids[m.base+1].Order {
-			log.Printf("[ERROR] buy order postion is NOT the base+1, base: %d", m.base)
+			log.Errorf("[ERROR] buy order postion is NOT the base+1, base: %d", m.base)
 			return
 		}
 		m.grids[m.base+1].Order = 0
@@ -280,23 +297,23 @@ func (m *Manager) processOrderTrade(tradeId int64, orderId uint64, clientOrderId
 	} else if strings.HasPrefix(clientOrderId, "s-") {
 		// sell order filled
 		if orderId != m.grids[m.base-1].Order {
-			log.Printf("[ERROR] sell order postion is NOT the base+1, base: %d", m.base)
+			log.Errorf("[ERROR] sell order postion is NOT the base+1, base: %d", m.base)
 			return
 		}
 		m.grids[m.base-1].Order = 0
 		m.up()
 	} else {
-		log.Printf("I don't know the clientOrderId: %s, maybe it's a manual order: %s", clientOrderId, orderId)
+		log.Warnf("I don't know the clientOrderId: %s, maybe it's a manual order: %s", clientOrderId, orderId)
 	}
 }
 
 func (m *Manager) buy(clientOrderId string, price, amount decimal.Decimal) (uint64, error) {
-	log.Printf("[Order][buy] price: %s, amount: %s", price, amount)
+	log.Infof("[Order][buy] price: %s, amount: %s", price, amount)
 	return m.ex.PlaceOrder(huobi.OrderTypeBuyLimit, m.symbol, clientOrderId, price, amount)
 }
 
 func (m *Manager) sell(clientOrderId string, price, amount decimal.Decimal) (uint64, error) {
-	log.Printf("[Order][sell] price: %s, amount: %s", price, amount)
+	log.Infof("[Order][sell] price: %s, amount: %s", price, amount)
 	return m.ex.PlaceOrder(huobi.OrderTypeSellLimit, m.symbol, clientOrderId, price, amount)
 }
 
@@ -309,7 +326,7 @@ func (m *Manager) setupGridOrders(ctx context.Context) {
 			clientOrderId := fmt.Sprintf("s-%d-%d", i, time.Now().Unix())
 			orderId, err := m.sell(clientOrderId, m.grids[i].Price, m.grids[i].AmountSell)
 			if err != nil {
-				log.Printf("error when setupGridOrders, grid number: %d, err: %s", i, err)
+				log.Errorf("error when setupGridOrders, grid number: %d, err: %s", i, err)
 				continue
 			}
 			m.grids[i].Order = orderId
@@ -318,7 +335,7 @@ func (m *Manager) setupGridOrders(ctx context.Context) {
 			clientOrderId := fmt.Sprintf("b-%d-%d", i, time.Now().Unix())
 			orderId, err := m.buy(clientOrderId, m.grids[i].Price, m.grids[i].AmountBuy)
 			if err != nil {
-				log.Printf("error when setupGridOrders, grid number: %d, err: %s", i, err)
+				log.Errorf("error when setupGridOrders, grid number: %d, err: %s", i, err)
 				continue
 			}
 			m.grids[i].Order = orderId
@@ -332,11 +349,11 @@ func (m *Manager) cancelAllOrders(ctx context.Context) {
 			continue
 		}
 		if ret, err := m.ex.CancelOrder(m.grids[i].Order); err == nil {
-			log.Printf("cancel order successful, orderId: %d", m.grids[i].Order)
+			log.Infof("cancel order successful, orderId: %d", m.grids[i].Order)
 			m.grids[i].Order = 0
 
 		} else {
-			log.Printf("cancel order error: orderId: %d, return code: %d, err: %s", m.grids[i].Order, ret, err)
+			log.Errorf("cancel order error: orderId: %d, return code: %d, err: %s", m.grids[i].Order, ret, err)
 		}
 	}
 }
@@ -352,19 +369,19 @@ func (m *Manager) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, pri
 		moneyDelta := moneyNeed.Sub(moneyHeld)
 		sellAmount := moneyDelta.Div(price).Round(m.amountPrecision)
 		if coinHeld.Cmp(coinNeed.Add(sellAmount)) == -1 {
-			log.Printf("no enough coin for rebalance: need hold %s and sell %s (%s in total), only have %s",
+			log.Errorf("no enough coin for rebalance: need hold %s and sell %s (%s in total), only have %s",
 				coinNeed, sellAmount, coinNeed.Add(sellAmount), coinHeld)
 			direct = -2
 			return
 		}
 
 		if sellAmount.Cmp(m.minAmount) == -1 {
-			log.Printf("sell amount %s less than minAmount(%s), won't sell", sellAmount, m.minAmount)
+			log.Errorf("sell amount %s less than minAmount(%s), won't sell", sellAmount, m.minAmount)
 			direct = 0
 			return
 		}
 		if m.minTotal.Cmp(price.Mul(sellAmount)) == 1 {
-			log.Printf("sell total %s less than minTotal(%s), won't sell", price.Mul(sellAmount), m.minTotal)
+			log.Infof("sell total %s less than minTotal(%s), won't sell", price.Mul(sellAmount), m.minTotal)
 			direct = 0
 			return
 		}
@@ -373,7 +390,7 @@ func (m *Manager) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, pri
 	} else {
 		// buy coin
 		if coinNeed.Cmp(coinHeld) == -1 {
-			log.Printf("no need to rebalance: need coin %s, has %s, need money %s, has %s",
+			log.Infof("no need to rebalance: need coin %s, has %s, need money %s, has %s",
 				coinNeed, coinHeld, moneyNeed, moneyHeld)
 			direct = 0
 			return
@@ -386,12 +403,12 @@ func (m *Manager) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, pri
 			direct = 2
 		}
 		if coinDelta.Cmp(m.minAmount) == -1 {
-			log.Printf("buy amount %s less than minAmount(%s), won't sell", coinDelta, m.minAmount)
+			log.Errorf("buy amount %s less than minAmount(%s), won't sell", coinDelta, m.minAmount)
 			direct = 0
 			return
 		}
 		if buyTotal.Cmp(m.minTotal) == -1 {
-			log.Printf("buy total %s less than minTotal(%s), won't sell", buyTotal, m.minTotal)
+			log.Errorf("buy total %s less than minTotal(%s), won't sell", buyTotal, m.minTotal)
 			direct = 0
 			return
 		}
@@ -404,7 +421,7 @@ func (m *Manager) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, pri
 func (m *Manager) up() {
 	// make sure base >= 0
 	if m.base == 0 {
-		log.Println("grid base = 0, up OUT")
+		log.Infof("grid base = 0, up OUT")
 		return
 	}
 	m.base--
@@ -420,7 +437,7 @@ func (m *Manager) up() {
 func (m *Manager) down() {
 	// make sure base <= len(grids)
 	if m.base == len(m.grids) {
-		log.Printf("grid base = %d, down OUT", m.base)
+		log.Infof("grid base = %d, down OUT", m.base)
 		return
 	}
 	m.base++
