@@ -3,6 +3,7 @@ package grid
 import (
 	"context"
 	"fmt"
+	"github.com/huobirdcenter/huobi_golang/logging/applogger"
 	"github.com/huobirdcenter/huobi_golang/pkg/response/order"
 	"github.com/shopspring/decimal"
 	"github.com/xyths/hs"
@@ -45,11 +46,11 @@ type Manager struct {
 	minAmount       decimal.Decimal
 	minTotal        decimal.Decimal
 
-	scale        decimal.Decimal
-	grids        []Grid
-	base         int
-	averagePrice decimal.Decimal
-	amountHeld   decimal.Decimal
+	scale  decimal.Decimal
+	grids  []Grid
+	base   int
+	cost   decimal.Decimal // average price
+	amount decimal.Decimal // amount held
 }
 
 func New(configFilename string) *Manager {
@@ -73,6 +74,7 @@ func (m *Manager) Trade(ctx context.Context) error {
 	clientId := fmt.Sprintf("%d", time.Now().Unix())
 	// subscribe all event
 	go m.ex.SubscribeOrder(ctx, m.symbol, clientId, m.OrderUpdateHandler)
+	go m.ex.SubscribeTradeClear(ctx, m.symbol, clientId, m.TradeClearHandler)
 	// rebalance
 	if err := m.ReBalance(ctx); err != nil {
 		log.Fatalf("error when rebalance: %s", err)
@@ -202,8 +204,8 @@ func (m *Manager) ReBalance(ctx context.Context) error {
 	moneyHeld := balance[m.quoteCurrency]
 	coinHeld := balance[m.baseCurrency]
 	log.Infof("account has money %s, coin %s", moneyHeld, coinHeld)
-	m.averagePrice = price
-	m.amountHeld = coinNeed
+	m.cost = price
+	m.amount = coinNeed
 	direct, amount := m.assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, price)
 	if direct == -2 || direct == 2 {
 		log.Fatalf("no enough money for rebalance, direct: %d", direct)
@@ -269,6 +271,45 @@ func (m *Manager) OrderUpdateHandler(response interface{}) {
 	}
 }
 
+func (m *Manager) TradeClearHandler(response interface{}) {
+	subResponse, ok := response.(order.SubscribeTradeClearResponse)
+	if ok {
+		if subResponse.Action == "sub" {
+			if subResponse.IsSuccess() {
+				applogger.Info("Subscription TradeClear topic %s successfully", subResponse.Ch)
+			} else {
+				applogger.Error("Subscription TradeClear topic %s error, code: %d, message: %s",
+					subResponse.Ch, subResponse.Code, subResponse.Message)
+			}
+		} else if subResponse.Action == "push" {
+			if subResponse.Data == nil {
+				log.Infof("SubscribeOrderV2Response has no data: %#v", subResponse)
+				return
+			}
+			o := subResponse.Data
+			trade := huobi.Trade{
+				Symbol:            subResponse.Data.Symbol,
+				OrderId:           subResponse.Data.OrderId,
+				OrderType:         subResponse.Data.OrderType,
+				Aggressor:         subResponse.Data.Aggressor,
+				Id:                subResponse.Data.TradeId,
+				Time:              subResponse.Data.TradeTime,
+				Price:             decimal.RequireFromString(subResponse.Data.TradePrice),
+				Volume:            decimal.RequireFromString(subResponse.Data.TradeVolume),
+				TransactFee:       decimal.RequireFromString(subResponse.Data.TransactFee),
+				FeeDeduct:         decimal.RequireFromString(subResponse.Data.FeeDeduct),
+				FeeDeductCurrency: subResponse.Data.FeeDeductType,
+			}
+			applogger.Info("Order update, symbol: %s, order id: %d, price: %s, volume: %s",
+				o.Symbol, o.OrderId, o.TradePrice, o.TradeVolume)
+			go m.processClearTrade(trade)
+		}
+	} else {
+		applogger.Warn("Received unknown response: %v", response)
+	}
+
+}
+
 func (m *Manager) processOrderTrade(tradeId int64, orderId uint64, clientOrderId, orderStatus, tradePrice, tradeVolume, remainAmount string) {
 	log.Sugar.Debugw("process order trade",
 		"tradeId", tradeId,
@@ -298,7 +339,7 @@ func (m *Manager) processOrderTrade(tradeId int64, orderId uint64, clientOrderId
 	if strings.HasPrefix(clientOrderId, "b-") {
 		// buy order filled
 		if orderId != m.grids[m.base+1].Order {
-			log.Errorf("[ERROR] buy order postion is NOT the base+1, base: %d", m.base)
+			log.Errorf("[ERROR] buy order position is NOT the base+1, base: %d", m.base)
 			return
 		}
 		m.grids[m.base+1].Order = 0
@@ -306,7 +347,7 @@ func (m *Manager) processOrderTrade(tradeId int64, orderId uint64, clientOrderId
 	} else if strings.HasPrefix(clientOrderId, "s-") {
 		// sell order filled
 		if orderId != m.grids[m.base-1].Order {
-			log.Errorf("[ERROR] sell order postion is NOT the base+1, base: %d", m.base)
+			log.Errorf("[ERROR] sell order position is NOT the base+1, base: %d", m.base)
 			return
 		}
 		m.grids[m.base-1].Order = 0
@@ -314,6 +355,28 @@ func (m *Manager) processOrderTrade(tradeId int64, orderId uint64, clientOrderId
 	} else {
 		log.Warnf("I don't know the clientOrderId: %s, maybe it's a manual order: %s", clientOrderId, orderId)
 	}
+}
+
+func (m *Manager) processClearTrade(t huobi.Trade) {
+	log.Sugar.Debugw("process trade clear",
+		"tradeId", t.Id,
+		"orderId", t.OrderId,
+		"orderType", t.OrderType,
+		"price", t.Price,
+		"volume", t.Volume,
+		"transactFee", t.TransactFee,
+		"feeDeduct", t.FeeDeduct,
+		"feeDeductCurrency", t.FeeDeductCurrency,
+	)
+	oldTotal := m.amount.Mul(m.cost)
+	if t.OrderType == huobi.OrderTypeSellLimit {
+		t.Volume = t.Volume.Neg()
+	}
+	m.amount = m.amount.Add(t.Volume)
+	tradeTotal := t.Volume.Mul(t.Price)
+	newTotal := oldTotal.Add(tradeTotal)
+	m.cost = newTotal.Div(m.amount)
+	log.Sugar.Infow("Average cost update", "cost", m.cost)
 }
 
 func (m *Manager) buy(clientOrderId string, price, amount decimal.Decimal) (uint64, error) {
