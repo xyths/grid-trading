@@ -32,7 +32,7 @@ type Config struct {
 	Strategy StrategyConf
 }
 
-type Manager struct {
+type Trader struct {
 	config Config
 
 	mdb *mongo.Database
@@ -53,35 +53,35 @@ type Manager struct {
 	amount decimal.Decimal // amount held
 }
 
-func New(configFilename string) *Manager {
+func New(configFilename string) *Trader {
 	cfg := Config{}
 	if err := hs.ParseJsonConfig(configFilename, &cfg); err != nil {
 		log.Fatal(err)
 	}
-	return &Manager{
+	return &Trader{
 		config: cfg,
 	}
 }
 
-func (m *Manager) Init(ctx context.Context) {
-	m.initMongo(ctx)
-	m.initEx(ctx)
-	m.initGrids(ctx)
+func (t *Trader) Init(ctx context.Context) {
+	t.initMongo(ctx)
+	t.initEx(ctx)
+	t.initGrids(ctx)
 }
 
-func (m *Manager) Trade(ctx context.Context) error {
-	_ = m.Print(ctx)
+func (t *Trader) Trade(ctx context.Context) error {
+	_ = t.Print(ctx)
 	clientId := fmt.Sprintf("%d", time.Now().Unix())
 	// subscribe all event
-	go m.ex.SubscribeOrder(ctx, m.symbol, clientId, m.OrderUpdateHandler)
-	go m.ex.SubscribeTradeClear(ctx, m.symbol, clientId, m.TradeClearHandler)
+	go t.ex.SubscribeOrder(ctx, t.symbol, clientId, t.OrderUpdateHandler)
+	go t.ex.SubscribeTradeClear(ctx, t.symbol, clientId, t.TradeClearHandler)
 	// rebalance
-	if err := m.ReBalance(ctx); err != nil {
+	if err := t.ReBalance(ctx); err != nil {
 		log.Fatalf("error when rebalance: %s", err)
 	}
 
 	// setup all grid orders
-	m.setupGridOrders(ctx)
+	t.setupGridOrders(ctx)
 
 	quit := make(chan os.Signal)
 	// kill (no param) default send syscall.SIGTERM
@@ -95,25 +95,25 @@ func (m *Manager) Trade(ctx context.Context) error {
 }
 
 // print grid to stdout
-func (m *Manager) Print(ctx context.Context) error {
-	delta, _ := m.scale.Float64()
+func (t *Trader) Print(ctx context.Context) error {
+	delta, _ := t.scale.Float64()
 	delta = 1 - delta
-	log.Infof("Scale is %s (%1.2f%%)", m.scale.String(), 100*delta)
+	log.Infof("Scale is %s (%1.2f%%)", t.scale.String(), 100*delta)
 	log.Infof("Id\tTotal\tPrice\tAmountBuy\tAmountSell")
-	for _, g := range m.grids {
+	for _, g := range t.grids {
 		log.Infof("%2d\t%s\t%s\t%s\t%s", g.Id, g.TotalBuy, g.Price, g.AmountBuy, g.AmountSell)
 	}
 
 	return nil
 }
 
-func (m *Manager) Close(ctx context.Context) {
-	_ = m.mdb.Client().Disconnect(ctx)
-	m.cancelAllOrders(ctx)
+func (t *Trader) Close(ctx context.Context) {
+	_ = t.mdb.Client().Disconnect(ctx)
+	t.cancelAllOrders(ctx)
 }
 
-func (m *Manager) initMongo(ctx context.Context) {
-	clientOpts := options.Client().ApplyURI(m.config.Mongo.URI)
+func (t *Trader) initMongo(ctx context.Context) {
+	clientOpts := options.Client().ApplyURI(t.config.Mongo.URI)
 	client, err := mongo.Connect(ctx, clientOpts)
 	if err != nil {
 		log.Fatal("Error when connect to mongo:", err)
@@ -123,51 +123,51 @@ func (m *Manager) initMongo(ctx context.Context) {
 	if err != nil {
 		log.Fatal("Error when ping to mongo:", err)
 	}
-	m.mdb = client.Database(m.config.Mongo.Database)
+	t.mdb = client.Database(t.config.Mongo.Database)
 }
 
-func (m *Manager) initEx(ctx context.Context) {
-	m.ex = huobi.New(m.config.Exchange.Label, m.config.Exchange.Key, m.config.Exchange.Secret, m.config.Exchange.Host)
-	switch m.config.Exchange.Currency {
+func (t *Trader) initEx(ctx context.Context) {
+	t.ex = huobi.New(t.config.Exchange.Label, t.config.Exchange.Key, t.config.Exchange.Secret, t.config.Exchange.Host)
+	switch t.config.Exchange.Currency {
 	case "btc_usdt":
-		m.symbol = huobi.BTC_USDT
-		m.baseCurrency = "btc"
-		m.quoteCurrency = "usdt"
+		t.symbol = huobi.BTC_USDT
+		t.baseCurrency = "btc"
+		t.quoteCurrency = "usdt"
 	default:
-		m.symbol = "btc_usdt"
+		t.symbol = "btc_usdt"
 	}
-	m.pricePrecision = int32(huobi.PricePrecision[m.symbol])
-	m.amountPrecision = int32(huobi.AmountPrecision[m.symbol])
-	m.minAmount = decimal.NewFromFloat(huobi.MinAmount[m.symbol])
-	m.minTotal = decimal.NewFromInt(huobi.MinTotal[m.symbol])
+	t.pricePrecision = int32(huobi.PricePrecision[t.symbol])
+	t.amountPrecision = int32(huobi.AmountPrecision[t.symbol])
+	t.minAmount = decimal.NewFromFloat(huobi.MinAmount[t.symbol])
+	t.minTotal = decimal.NewFromInt(huobi.MinTotal[t.symbol])
 	//log.Debugf("init ex, pricePrecision = %d, amountPrecision = %d, minAmount = %s, minTotal = %s",
-	//	m.pricePrecision, m.amountPrecision, m.minAmount.String(), m.minTotal.String())
+	//	t.pricePrecision, t.amountPrecision, t.minAmount.String(), t.minTotal.String())
 }
 
-func (m *Manager) initGrids(ctx context.Context) {
-	maxPrice := m.config.Strategy.MaxPrice
-	minPrice := m.config.Strategy.MinPrice
-	number := m.config.Strategy.Number
-	total := m.config.Strategy.Total
+func (t *Trader) initGrids(ctx context.Context) {
+	maxPrice := t.config.Strategy.MaxPrice
+	minPrice := t.config.Strategy.MinPrice
+	number := t.config.Strategy.Number
+	total := t.config.Strategy.Total
 	//log.Debugf("init grids, MaxPrice: %f, MinPrice: %f, Grid Number: %d, total: %f",
 	//	maxPrice, minPrice, number, total)
-	m.scale = decimal.NewFromFloat(math.Pow(minPrice/maxPrice, 1.0/float64(number)))
+	t.scale = decimal.NewFromFloat(math.Pow(minPrice/maxPrice, 1.0/float64(number)))
 	preTotal := decimal.NewFromFloat(total / float64(number))
 	currentPrice := decimal.NewFromFloat(maxPrice)
 	currentGrid := Grid{
 		Id:    0,
-		Price: currentPrice.Round(m.pricePrecision),
+		Price: currentPrice.Round(t.pricePrecision),
 	}
-	m.grids = append(m.grids, currentGrid)
+	t.grids = append(t.grids, currentGrid)
 	for i := 1; i <= number; i++ {
-		currentPrice = currentPrice.Mul(m.scale).Round(m.pricePrecision)
-		amountBuy := preTotal.Div(currentPrice).Round(m.amountPrecision)
-		if amountBuy.Cmp(m.minAmount) == -1 {
-			log.Fatalf("amount %s less than minAmount(%s)", amountBuy, m.minAmount)
+		currentPrice = currentPrice.Mul(t.scale).Round(t.pricePrecision)
+		amountBuy := preTotal.Div(currentPrice).Round(t.amountPrecision)
+		if amountBuy.Cmp(t.minAmount) == -1 {
+			log.Fatalf("amount %s less than minAmount(%s)", amountBuy, t.minAmount)
 		}
 		realTotal := currentPrice.Mul(amountBuy)
-		if realTotal.Cmp(m.minTotal) == -1 {
-			log.Fatalf("total %s less than minTotal(%s)", realTotal, m.minTotal)
+		if realTotal.Cmp(t.minTotal) == -1 {
+			log.Fatalf("total %s less than minTotal(%s)", realTotal, t.minTotal)
 		}
 		currentGrid = Grid{
 			Id:        i,
@@ -175,47 +175,47 @@ func (m *Manager) initGrids(ctx context.Context) {
 			AmountBuy: amountBuy,
 			TotalBuy:  realTotal,
 		}
-		m.grids = append(m.grids, currentGrid)
-		m.grids[i-1].AmountSell = amountBuy
+		t.grids = append(t.grids, currentGrid)
+		t.grids[i-1].AmountSell = amountBuy
 	}
 }
 
-func (m *Manager) ReBalance(ctx context.Context) error {
-	price, err := m.ex.GetPrice(m.symbol)
+func (t *Trader) ReBalance(ctx context.Context) error {
+	price, err := t.ex.GetPrice(t.symbol)
 	if err != nil {
 		return err
 	}
-	m.base = 0
+	t.base = 0
 	moneyNeed := decimal.NewFromInt(0)
 	coinNeed := decimal.NewFromInt(0)
-	for i, g := range m.grids {
+	for i, g := range t.grids {
 		if g.Price.Cmp(price) == 1 {
-			m.base = i
+			t.base = i
 			coinNeed = coinNeed.Add(g.AmountBuy)
 		} else {
 			moneyNeed = moneyNeed.Add(g.TotalBuy)
 		}
 	}
-	log.Infof("now base = %d, moneyNeed = %s, coinNeed = %s", m.base, moneyNeed, coinNeed)
-	balance, err := m.ex.GetSpotBalance()
+	log.Infof("now base = %d, moneyNeed = %s, coinNeed = %s", t.base, moneyNeed, coinNeed)
+	balance, err := t.ex.GetSpotBalance()
 	if err != nil {
 		log.Fatalf("error when get balance in rebalance: %s", err)
 	}
-	moneyHeld := balance[m.quoteCurrency]
-	coinHeld := balance[m.baseCurrency]
+	moneyHeld := balance[t.quoteCurrency]
+	coinHeld := balance[t.baseCurrency]
 	log.Infof("account has money %s, coin %s", moneyHeld, coinHeld)
-	m.cost = price
-	m.amount = coinNeed
-	direct, amount := m.assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, price)
+	t.cost = price
+	t.amount = coinNeed
+	direct, amount := t.assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, price)
 	if direct == -2 || direct == 2 {
 		log.Fatalf("no enough money for rebalance, direct: %d", direct)
 	} else if direct == 0 {
 		log.Info("no need to rebalance")
 	} else if direct == -1 {
 		// place sell order
-		m.base++
+		t.base++
 		clientOrderId := fmt.Sprintf("p-s-%d", time.Now().Unix())
-		orderId, err := m.sell(clientOrderId, price, amount)
+		orderId, err := t.sell(clientOrderId, price, amount)
 		if err != nil {
 			log.Fatalf("error when rebalance: %s", err)
 		}
@@ -224,7 +224,7 @@ func (m *Manager) ReBalance(ctx context.Context) error {
 	} else if direct == 1 {
 		// place buy order
 		clientOrderId := fmt.Sprintf("p-b-%d", time.Now().Unix())
-		orderId, err := m.buy(clientOrderId, price, amount)
+		orderId, err := t.buy(clientOrderId, price, amount)
 		if err != nil {
 			log.Fatalf("error when rebalance: %s", err)
 		}
@@ -235,7 +235,7 @@ func (m *Manager) ReBalance(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) OrderUpdateHandler(response interface{}) {
+func (t *Trader) OrderUpdateHandler(response interface{}) {
 	subOrderResponse, ok := response.(order.SubscribeOrderV2Response)
 	if !ok {
 		log.Warnf("Received unknown response: %v", response)
@@ -263,7 +263,7 @@ func (m *Manager) OrderUpdateHandler(response interface{}) {
 			log.Debugf("order cancelled, orderId: %d, clientOrderId: %s", o.OrderId, o.ClientOrderId)
 		case "trade":
 			log.Debugf("order filled, orderId: %d, clientOrderId: %s, fill type: %s", o.OrderId, o.ClientOrderId, o.OrderStatus)
-			go m.processOrderTrade(o.TradeId, uint64(o.OrderId), o.ClientOrderId, o.OrderStatus, o.TradePrice, o.TradeVolume, o.RemainAmt)
+			go t.processOrderTrade(o.TradeId, uint64(o.OrderId), o.ClientOrderId, o.OrderStatus, o.TradePrice, o.TradeVolume, o.RemainAmt)
 		default:
 			log.Warnf("unknown eventType, should never happen, orderId: %d, clientOrderId: %s, eventType: %s",
 				o.OrderId, o.ClientOrderId, o.EventType)
@@ -271,7 +271,7 @@ func (m *Manager) OrderUpdateHandler(response interface{}) {
 	}
 }
 
-func (m *Manager) TradeClearHandler(response interface{}) {
+func (t *Trader) TradeClearHandler(response interface{}) {
 	subResponse, ok := response.(order.SubscribeTradeClearResponse)
 	if ok {
 		if subResponse.Action == "sub" {
@@ -302,7 +302,7 @@ func (m *Manager) TradeClearHandler(response interface{}) {
 			}
 			applogger.Info("Order update, symbol: %s, order id: %d, price: %s, volume: %s",
 				o.Symbol, o.OrderId, o.TradePrice, o.TradeVolume)
-			go m.processClearTrade(trade)
+			go t.processClearTrade(trade)
 		}
 	} else {
 		applogger.Warn("Received unknown response: %v", response)
@@ -310,7 +310,7 @@ func (m *Manager) TradeClearHandler(response interface{}) {
 
 }
 
-func (m *Manager) processOrderTrade(tradeId int64, orderId uint64, clientOrderId, orderStatus, tradePrice, tradeVolume, remainAmount string) {
+func (t *Trader) processOrderTrade(tradeId int64, orderId uint64, clientOrderId, orderStatus, tradePrice, tradeVolume, remainAmount string) {
 	log.Sugar.Debugw("process order trade",
 		"tradeId", tradeId,
 		"orderId", orderId,
@@ -338,26 +338,26 @@ func (m *Manager) processOrderTrade(tradeId int64, orderId uint64, clientOrderId
 	}
 	if strings.HasPrefix(clientOrderId, "b-") {
 		// buy order filled
-		if orderId != m.grids[m.base+1].Order {
-			log.Errorf("[ERROR] buy order position is NOT the base+1, base: %d", m.base)
+		if orderId != t.grids[t.base+1].Order {
+			log.Errorf("[ERROR] buy order position is NOT the base+1, base: %d", t.base)
 			return
 		}
-		m.grids[m.base+1].Order = 0
-		m.down()
+		t.grids[t.base+1].Order = 0
+		t.down()
 	} else if strings.HasPrefix(clientOrderId, "s-") {
 		// sell order filled
-		if orderId != m.grids[m.base-1].Order {
-			log.Errorf("[ERROR] sell order position is NOT the base+1, base: %d", m.base)
+		if orderId != t.grids[t.base-1].Order {
+			log.Errorf("[ERROR] sell order position is NOT the base+1, base: %d", t.base)
 			return
 		}
-		m.grids[m.base-1].Order = 0
-		m.up()
+		t.grids[t.base-1].Order = 0
+		t.up()
 	} else {
 		log.Warnf("I don't know the clientOrderId: %s, maybe it's a manual order: %s", clientOrderId, orderId)
 	}
 }
 
-func (m *Manager) processClearTrade(t huobi.Trade) {
+func (t *Trader) processClearTrade(t huobi.Trade) {
 	log.Sugar.Debugw("process trade clear",
 		"tradeId", t.Id,
 		"orderId", t.OrderId,
@@ -368,64 +368,64 @@ func (m *Manager) processClearTrade(t huobi.Trade) {
 		"feeDeduct", t.FeeDeduct,
 		"feeDeductCurrency", t.FeeDeductCurrency,
 	)
-	oldTotal := m.amount.Mul(m.cost)
+	oldTotal := t.amount.Mul(t.cost)
 	if t.OrderType == huobi.OrderTypeSellLimit {
 		t.Volume = t.Volume.Neg()
 	}
-	m.amount = m.amount.Add(t.Volume)
+	t.amount = t.amount.Add(t.Volume)
 	tradeTotal := t.Volume.Mul(t.Price)
 	newTotal := oldTotal.Add(tradeTotal)
-	m.cost = newTotal.Div(m.amount)
-	log.Sugar.Infow("Average cost update", "cost", m.cost)
+	t.cost = newTotal.Div(t.amount)
+	log.Sugar.Infow("Average cost update", "cost", t.cost)
 }
 
-func (m *Manager) buy(clientOrderId string, price, amount decimal.Decimal) (uint64, error) {
+func (t *Trader) buy(clientOrderId string, price, amount decimal.Decimal) (uint64, error) {
 	log.Infof("[Order][buy] price: %s, amount: %s", price, amount)
-	return m.ex.PlaceOrder(huobi.OrderTypeBuyLimit, m.symbol, clientOrderId, price, amount)
+	return t.ex.PlaceOrder(huobi.OrderTypeBuyLimit, t.symbol, clientOrderId, price, amount)
 }
 
-func (m *Manager) sell(clientOrderId string, price, amount decimal.Decimal) (uint64, error) {
+func (t *Trader) sell(clientOrderId string, price, amount decimal.Decimal) (uint64, error) {
 	log.Infof("[Order][sell] price: %s, amount: %s", price, amount)
-	return m.ex.PlaceOrder(huobi.OrderTypeSellLimit, m.symbol, clientOrderId, price, amount)
+	return t.ex.PlaceOrder(huobi.OrderTypeSellLimit, t.symbol, clientOrderId, price, amount)
 }
 
-func (m *Manager) setupGridOrders(ctx context.Context) {
-	for i := 0; i < len(m.grids); i++ {
-		if i == m.base {
+func (t *Trader) setupGridOrders(ctx context.Context) {
+	for i := 0; i < len(t.grids); i++ {
+		if i == t.base {
 			continue
-		} else if i < m.base {
+		} else if i < t.base {
 			// sell
 			clientOrderId := fmt.Sprintf("s-%d-%d", i, time.Now().Unix())
-			orderId, err := m.sell(clientOrderId, m.grids[i].Price, m.grids[i].AmountSell)
+			orderId, err := t.sell(clientOrderId, t.grids[i].Price, t.grids[i].AmountSell)
 			if err != nil {
 				log.Errorf("error when setupGridOrders, grid number: %d, err: %s", i, err)
 				continue
 			}
-			m.grids[i].Order = orderId
+			t.grids[i].Order = orderId
 		} else {
 			// buy
 			clientOrderId := fmt.Sprintf("b-%d-%d", i, time.Now().Unix())
-			orderId, err := m.buy(clientOrderId, m.grids[i].Price, m.grids[i].AmountBuy)
+			orderId, err := t.buy(clientOrderId, t.grids[i].Price, t.grids[i].AmountBuy)
 			if err != nil {
 				log.Errorf("error when setupGridOrders, grid number: %d, err: %s", i, err)
 				continue
 			}
-			m.grids[i].Order = orderId
+			t.grids[i].Order = orderId
 		}
 	}
 }
 
-func (m *Manager) cancelAllOrders(ctx context.Context) {
-	for i := 0; i < len(m.grids); i++ {
-		if m.grids[i].Order == 0 {
+func (t *Trader) cancelAllOrders(ctx context.Context) {
+	for i := 0; i < len(t.grids); i++ {
+		if t.grids[i].Order == 0 {
 			continue
 		}
-		if ret, err := m.ex.CancelOrder(m.grids[i].Order); err == nil {
-			log.Infof("cancel order successful, orderId: %d", m.grids[i].Order)
-			m.grids[i].Order = 0
+		if ret, err := t.ex.CancelOrder(t.grids[i].Order); err == nil {
+			log.Infof("cancel order successful, orderId: %d", t.grids[i].Order)
+			t.grids[i].Order = 0
 
 		} else {
-			log.Errorf("cancel order error: orderId: %d, return code: %d, err: %s", m.grids[i].Order, ret, err)
+			log.Errorf("cancel order error: orderId: %d, return code: %d, err: %s", t.grids[i].Order, ret, err)
 		}
 	}
 }
@@ -435,11 +435,11 @@ func (m *Manager) cancelAllOrders(ctx context.Context) {
 // -1: sell
 // 2: no enough money
 // -2: no enough coin
-func (m *Manager) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, price decimal.Decimal) (direct int, amount decimal.Decimal) {
+func (t *Trader) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, price decimal.Decimal) (direct int, amount decimal.Decimal) {
 	if moneyNeed.Cmp(moneyHeld) == 1 {
 		// sell coin
 		moneyDelta := moneyNeed.Sub(moneyHeld)
-		sellAmount := moneyDelta.Div(price).Round(m.amountPrecision)
+		sellAmount := moneyDelta.Div(price).Round(t.amountPrecision)
 		if coinHeld.Cmp(coinNeed.Add(sellAmount)) == -1 {
 			log.Errorf("no enough coin for rebalance: need hold %s and sell %s (%s in total), only have %s",
 				coinNeed, sellAmount, coinNeed.Add(sellAmount), coinHeld)
@@ -447,13 +447,13 @@ func (m *Manager) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, pri
 			return
 		}
 
-		if sellAmount.Cmp(m.minAmount) == -1 {
-			log.Errorf("sell amount %s less than minAmount(%s), won't sell", sellAmount, m.minAmount)
+		if sellAmount.Cmp(t.minAmount) == -1 {
+			log.Errorf("sell amount %s less than minAmount(%s), won't sell", sellAmount, t.minAmount)
 			direct = 0
 			return
 		}
-		if m.minTotal.Cmp(price.Mul(sellAmount)) == 1 {
-			log.Infof("sell total %s less than minTotal(%s), won't sell", price.Mul(sellAmount), m.minTotal)
+		if t.minTotal.Cmp(price.Mul(sellAmount)) == 1 {
+			log.Infof("sell total %s less than minTotal(%s), won't sell", price.Mul(sellAmount), t.minTotal)
 			direct = 0
 			return
 		}
@@ -474,13 +474,13 @@ func (m *Manager) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, pri
 				moneyNeed, buyTotal, moneyNeed.Add(buyTotal), moneyHeld)
 			direct = 2
 		}
-		if coinDelta.Cmp(m.minAmount) == -1 {
-			log.Errorf("buy amount %s less than minAmount(%s), won't sell", coinDelta, m.minAmount)
+		if coinDelta.Cmp(t.minAmount) == -1 {
+			log.Errorf("buy amount %s less than minAmount(%s), won't sell", coinDelta, t.minAmount)
 			direct = 0
 			return
 		}
-		if buyTotal.Cmp(m.minTotal) == -1 {
-			log.Errorf("buy total %s less than minTotal(%s), won't sell", buyTotal, m.minTotal)
+		if buyTotal.Cmp(t.minTotal) == -1 {
+			log.Errorf("buy total %s less than minTotal(%s), won't sell", buyTotal, t.minTotal)
 			direct = 0
 			return
 		}
@@ -490,34 +490,34 @@ func (m *Manager) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, pri
 	return
 }
 
-func (m *Manager) up() {
+func (t *Trader) up() {
 	// make sure base >= 0
-	if m.base == 0 {
+	if t.base == 0 {
 		log.Infof("grid base = 0, up OUT")
 		return
 	}
-	m.base--
-	if m.base < len(m.grids)-2 {
+	t.base--
+	if t.base < len(t.grids)-2 {
 		// place buy order
-		clientOrderId := fmt.Sprintf("b-%d-%d", m.base+1, time.Now().Unix())
-		if orderId, err := m.buy(clientOrderId, m.grids[m.base+1].Price, m.grids[m.base+1].AmountBuy); err == nil {
-			m.grids[m.base+1].Order = orderId
+		clientOrderId := fmt.Sprintf("b-%d-%d", t.base+1, time.Now().Unix())
+		if orderId, err := t.buy(clientOrderId, t.grids[t.base+1].Price, t.grids[t.base+1].AmountBuy); err == nil {
+			t.grids[t.base+1].Order = orderId
 		}
 	}
 }
 
-func (m *Manager) down() {
+func (t *Trader) down() {
 	// make sure base <= len(grids)
-	if m.base == len(m.grids) {
-		log.Infof("grid base = %d, down OUT", m.base)
+	if t.base == len(t.grids) {
+		log.Infof("grid base = %d, down OUT", t.base)
 		return
 	}
-	m.base++
-	if m.base > 0 {
+	t.base++
+	if t.base > 0 {
 		// place sell order
-		clientOrderId := fmt.Sprintf("s-%d-%d", m.base-1, time.Now().Unix())
-		if orderId, err := m.sell(clientOrderId, m.grids[m.base-1].Price, m.grids[m.base-1].AmountSell); err == nil {
-			m.grids[m.base-1].Order = orderId
+		clientOrderId := fmt.Sprintf("s-%d-%d", t.base-1, time.Now().Unix())
+		if orderId, err := t.sell(clientOrderId, t.grids[t.base-1].Price, t.grids[t.base-1].AmountSell); err == nil {
+			t.grids[t.base-1].Order = orderId
 		}
 	}
 }

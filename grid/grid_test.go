@@ -6,7 +6,7 @@ import (
 )
 
 func TestManager_assetRebalancing(t *testing.T) {
-	m := Manager{
+	m := Trader{
 		pricePrecision:  2,
 		amountPrecision: 5,
 		minAmount:       decimal.NewFromFloat(0.0001),
