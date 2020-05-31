@@ -128,7 +128,7 @@ func (t *Trader) initMongo(ctx context.Context) {
 
 func (t *Trader) initEx(ctx context.Context) {
 	t.ex = huobi.New(t.config.Exchange.Label, t.config.Exchange.Key, t.config.Exchange.Secret, t.config.Exchange.Host)
-	switch t.config.Exchange.Currency {
+	switch t.config.Exchange.Symbols {
 	case "btc_usdt":
 		t.symbol = huobi.BTC_USDT
 		t.baseCurrency = "btc"
@@ -357,23 +357,23 @@ func (t *Trader) processOrderTrade(tradeId int64, orderId uint64, clientOrderId,
 	}
 }
 
-func (t *Trader) processClearTrade(t huobi.Trade) {
+func (t *Trader) processClearTrade(trade huobi.Trade) {
 	log.Sugar.Debugw("process trade clear",
-		"tradeId", t.Id,
-		"orderId", t.OrderId,
-		"orderType", t.OrderType,
-		"price", t.Price,
-		"volume", t.Volume,
-		"transactFee", t.TransactFee,
-		"feeDeduct", t.FeeDeduct,
-		"feeDeductCurrency", t.FeeDeductCurrency,
+		"tradeId", trade.Id,
+		"orderId", trade.OrderId,
+		"orderType", trade.OrderType,
+		"price", trade.Price,
+		"volume", trade.Volume,
+		"transactFee", trade.TransactFee,
+		"feeDeduct", trade.FeeDeduct,
+		"feeDeductCurrency", trade.FeeDeductCurrency,
 	)
 	oldTotal := t.amount.Mul(t.cost)
-	if t.OrderType == huobi.OrderTypeSellLimit {
-		t.Volume = t.Volume.Neg()
+	if trade.OrderType == huobi.OrderTypeSellLimit {
+		trade.Volume = trade.Volume.Neg()
 	}
-	t.amount = t.amount.Add(t.Volume)
-	tradeTotal := t.Volume.Mul(t.Price)
+	t.amount = t.amount.Add(trade.Volume)
+	tradeTotal := trade.Volume.Mul(trade.Price)
 	newTotal := oldTotal.Add(tradeTotal)
 	t.cost = newTotal.Div(t.amount)
 	log.Sugar.Infow("Average cost update", "cost", t.cost)
@@ -390,6 +390,7 @@ func (t *Trader) sell(clientOrderId string, price, amount decimal.Decimal) (uint
 }
 
 func (t *Trader) setupGridOrders(ctx context.Context) {
+	// TODO: 从下往上下卖单，防止币不够；从上往下下买单，防止钱不够
 	for i := 0; i < len(t.grids); i++ {
 		if i == t.base {
 			continue
@@ -436,7 +437,7 @@ func (t *Trader) cancelAllOrders(ctx context.Context) {
 // 2: no enough money
 // -2: no enough coin
 func (t *Trader) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, price decimal.Decimal) (direct int, amount decimal.Decimal) {
-	if moneyNeed.Cmp(moneyHeld) == 1 {
+	if moneyNeed.GreaterThan(moneyHeld) {
 		// sell coin
 		moneyDelta := moneyNeed.Sub(moneyHeld)
 		sellAmount := moneyDelta.Div(price).Round(t.amountPrecision)
@@ -447,12 +448,12 @@ func (t *Trader) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, pric
 			return
 		}
 
-		if sellAmount.Cmp(t.minAmount) == -1 {
+		if sellAmount.LessThan(t.minAmount) {
 			log.Errorf("sell amount %s less than minAmount(%s), won't sell", sellAmount, t.minAmount)
 			direct = 0
 			return
 		}
-		if t.minTotal.Cmp(price.Mul(sellAmount)) == 1 {
+		if t.minTotal.GreaterThan(price.Mul(sellAmount)) {
 			log.Infof("sell total %s less than minTotal(%s), won't sell", price.Mul(sellAmount), t.minTotal)
 			direct = 0
 			return
@@ -461,25 +462,25 @@ func (t *Trader) assetRebalancing(moneyNeed, coinNeed, moneyHeld, coinHeld, pric
 		amount = sellAmount
 	} else {
 		// buy coin
-		if coinNeed.Cmp(coinHeld) == -1 {
+		if coinNeed.LessThan(coinHeld) {
 			log.Infof("no need to rebalance: need coin %s, has %s, need money %s, has %s",
 				coinNeed, coinHeld, moneyNeed, moneyHeld)
 			direct = 0
 			return
 		}
-		coinDelta := coinNeed.Sub(coinHeld)
+		coinDelta := coinNeed.Sub(coinHeld).Round(t.amountPrecision)
 		buyTotal := coinDelta.Mul(price)
-		if moneyHeld.Cmp(moneyNeed.Add(buyTotal)) == -1 {
+		if moneyHeld.LessThan(moneyNeed.Add(buyTotal)) {
 			log.Fatalf("no enough money for rebalance: need hold %s and spend %s (%s in total)，only have %s",
 				moneyNeed, buyTotal, moneyNeed.Add(buyTotal), moneyHeld)
 			direct = 2
 		}
-		if coinDelta.Cmp(t.minAmount) == -1 {
+		if coinDelta.LessThan(t.minAmount) {
 			log.Errorf("buy amount %s less than minAmount(%s), won't sell", coinDelta, t.minAmount)
 			direct = 0
 			return
 		}
-		if buyTotal.Cmp(t.minTotal) == -1 {
+		if buyTotal.LessThan(t.minTotal) {
 			log.Errorf("buy total %s less than minTotal(%s), won't sell", buyTotal, t.minTotal)
 			direct = 0
 			return
