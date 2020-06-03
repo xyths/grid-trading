@@ -47,7 +47,7 @@ type Trader struct {
 	minTotal        decimal.Decimal
 
 	scale  decimal.Decimal
-	grids  []Grid
+	grids  []hs.Grid
 	base   int
 	cost   decimal.Decimal // average price
 	amount decimal.Decimal // amount held
@@ -101,7 +101,10 @@ func (t *Trader) Print(ctx context.Context) error {
 	log.Infof("Scale is %s (%1.2f%%)", t.scale.String(), 100*delta)
 	log.Infof("Id\tTotal\tPrice\tAmountBuy\tAmountSell")
 	for _, g := range t.grids {
-		log.Infof("%2d\t%s\t%s\t%s\t%s", g.Id, g.TotalBuy, g.Price, g.AmountBuy, g.AmountSell)
+		log.Infof("%2d\t%s\t%s\t%s\t%s",
+			g.Id, g.TotalBuy.StringFixed(t.amountPrecision+t.pricePrecision),
+			g.Price.StringFixed(t.pricePrecision),
+			g.AmountBuy.StringFixed(t.amountPrecision), g.AmountSell.StringFixed(t.amountPrecision))
 	}
 
 	return nil
@@ -154,7 +157,7 @@ func (t *Trader) initGrids(ctx context.Context) {
 	t.scale = decimal.NewFromFloat(math.Pow(minPrice/maxPrice, 1.0/float64(number)))
 	preTotal := decimal.NewFromFloat(total / float64(number))
 	currentPrice := decimal.NewFromFloat(maxPrice)
-	currentGrid := Grid{
+	currentGrid := hs.Grid{
 		Id:    0,
 		Price: currentPrice.Round(t.pricePrecision),
 	}
@@ -169,7 +172,7 @@ func (t *Trader) initGrids(ctx context.Context) {
 		if realTotal.Cmp(t.minTotal) == -1 {
 			log.Fatalf("total %s less than minTotal(%s)", realTotal, t.minTotal)
 		}
-		currentGrid = Grid{
+		currentGrid = hs.Grid{
 			Id:        i,
 			Price:     currentPrice,
 			AmountBuy: amountBuy,
@@ -390,29 +393,25 @@ func (t *Trader) sell(clientOrderId string, price, amount decimal.Decimal) (uint
 }
 
 func (t *Trader) setupGridOrders(ctx context.Context) {
-	// TODO: 从下往上下卖单，防止币不够；从上往下下买单，防止钱不够
-	for i := 0; i < len(t.grids); i++ {
-		if i == t.base {
+	for i := t.base - 1; i >= 0; i-- {
+		// sell
+		clientOrderId := fmt.Sprintf("s-%d-%d", i, time.Now().Unix())
+		orderId, err := t.sell(clientOrderId, t.grids[i].Price, t.grids[i].AmountSell)
+		if err != nil {
+			log.Errorf("error when setupGridOrders, grid number: %d, err: %s", i, err)
 			continue
-		} else if i < t.base {
-			// sell
-			clientOrderId := fmt.Sprintf("s-%d-%d", i, time.Now().Unix())
-			orderId, err := t.sell(clientOrderId, t.grids[i].Price, t.grids[i].AmountSell)
-			if err != nil {
-				log.Errorf("error when setupGridOrders, grid number: %d, err: %s", i, err)
-				continue
-			}
-			t.grids[i].Order = orderId
-		} else {
-			// buy
-			clientOrderId := fmt.Sprintf("b-%d-%d", i, time.Now().Unix())
-			orderId, err := t.buy(clientOrderId, t.grids[i].Price, t.grids[i].AmountBuy)
-			if err != nil {
-				log.Errorf("error when setupGridOrders, grid number: %d, err: %s", i, err)
-				continue
-			}
-			t.grids[i].Order = orderId
 		}
+		t.grids[i].Order = orderId
+	}
+	for i := t.base + 1; i < len(t.grids); i++ {
+		// buy
+		clientOrderId := fmt.Sprintf("b-%d-%d", i, time.Now().Unix())
+		orderId, err := t.buy(clientOrderId, t.grids[i].Price, t.grids[i].AmountBuy)
+		if err != nil {
+			log.Errorf("error when setupGridOrders, grid number: %d, err: %s", i, err)
+			continue
+		}
+		t.grids[i].Order = orderId
 	}
 }
 
