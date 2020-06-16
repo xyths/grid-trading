@@ -1,0 +1,19 @@
+{
+  "exchange": {
+    "name": "huobi",
+    "label": "tangzhu",
+    "symbols": "btc_usdt",
+    "key": "xxxx",
+    "secret": "yyyy",
+    "host": "api.huobi.me"
+  },
+  "mongo": {
+    "uri": "mongodb://localhost:27017/grid-trading?appName=grid-trading"
+  },
+  "strategy": {
+    "maxPrice": 13001,
+    "minPrice": 6999,
+    "number": 60,
+    "total": 305
+  }
+}
